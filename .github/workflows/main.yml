@@ -1,0 +1,100 @@
+name: panqueca_empresa
+run-name: ${{ github.actor }} Pipeline deploy 🎖️
+on: 
+  push:
+    branches:
+      - "main"
+    paths-ignore:
+      -"*.txt"
+jobs:
+  githubactions-senai:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: INSTALL PACKAGES
+        run: |
+          sudo apt update -y
+          sudo apt-get install figlet -y
+          curl https://static.snyk.io/cli/latest/snyk-linux -o snyk
+          chmod +x ./snyk
+          mv ./snyk /usr/local/bin/
+            
+      - name: Snyk Auth
+        run: |
+          snyk -d auth $SNYK_TOKEN
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_AUTH_TOKEN }}
+          
+      - name: Configurar AWS CLI
+        if: always()
+        run: |
+          echo "AWS CLIs" | figlet -f small
+          aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+          aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+          aws configure set default.region us-east-1
+          export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+          export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+          export AWS_DEFAULT_REGION="us-east-1"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: DockerLint (CI)
+        run: |
+          echo "DOCKERLINT" | figlet -f small
+          docker run --rm -i hadolint/hadolint < Dockerfile || true
+      
+      - name: Docker Login
+        if: always()
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Docker build (CI)
+        if: always()
+        run: |
+          echo $AWS_ACCESS_KEY_ID
+          docker build --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY --build-arg AWS_DEFAULT_REGION="us-east-1" -t apicontainer .
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          
+      - name: Docker Analysis (CI)
+        if: always()
+        run: |
+          echo "VULNERABILIDADES" | figlet -c -f small
+          snyk container test apicontainer:latest || true
+          
+      - name: Docker Push (CD)
+        if: always()
+        run: |
+          COMMIT_SHA=$(echo $GITHUB_SHA | cut -c 1-5)
+          echo $COMMIT_SHA
+
+          docker tag apicontainer:latest brendasaes/apicontainer:$COMMIT_SHA
+          docker push brendasaes/apicontainer:$COMMIT_SHA
+
+      - name: Create EC2 instance using Terraform
+          uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.1.0
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Configure EC2 instance for Docker
+        run: |
+          ssh-keyscan -H ${{ secrets.EC2_PUBLIC_IP }} >> ~/.ssh/known_hosts
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'sudo apt update -y && sudo apt install -y docker'
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'sudo usermod -aG docker ec2-user'
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'sudo systemctl start docker'
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'sudo systemctl enable docker'
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'docker pull brendasaes/<your-image-name>:<your-image-tag>'
+          ssh -i ${{ secrets.EC2_PRIVATE_KEY_PATH }} ec2-user@${{ secrets.EC2_PUBLIC_IP }} 'docker run -d -p 80:80 brendasaes/<your-image-name>:<your-image-tag>'
